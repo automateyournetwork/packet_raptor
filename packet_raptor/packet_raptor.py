@@ -33,37 +33,10 @@ class AIMessage(Message):
     """Represents a message from the AI."""
     pass
 
-# Function to generate priming text based on pcap data
-def returnSystemText(pcap_data: str) -> str:
-    PACKET_WHISPERER = f"""
-        You are a helper assistant specialized in analysing packet captures used for troubleshooting & technical analysis. Use the information present in packet_capture_info to answer all the questions truthfully. If the user asks about a specific application layer protocol, use the following hints to inspect the packet_capture_info to answer the question. Format your response in markdown text with line breaks & emojis.
-
-        hints :
-        http means tcp.port = 80
-        https means tcp.port = 443
-        snmp means udp.port = 161 or udp.port = 162
-        ntp means udp.port = 123
-        ftp means tcp.port = 21
-        ssh means tcp.port = 22
-        BGP means tcp.port = 179
-        OSPF uses IP protocol 89 (not TCP/UDP port-based, but rather directly on top of IP)
-        MPLS doesn't use a TCP/UDP port as it's a data-carrying mechanism for high-performance telecommunications networks
-        DNS means udp.port = 53 (also tcp.port = 53 for larger queries or zone transfers)s
-        DHCP uses udp.port = 67 for the server and udp.port = 68 for the client
-        SMTP means tcp.port = 25 (for email sending)
-        POP3 means tcp.port = 110 (for email retrieval)
-        IMAP means tcp.port = 143 (for email retrieval, with more features than POP3)
-        HTTPS means tcp.port = 443 (secure web browsing)
-        LDAP means tcp.port = 389 (for accessing and maintaining distributed directory information services over an IP network)
-        LDAPS means tcp.port = 636 (secure version of LDAP)
-        SIP means tcp.port = 5060 or udp.port = 5060 (for initiating interactive user sessions involving multimedia elements such as video, voice, chat, gaming, etc.)
-        RTP (Real-time Transport Protocol) doesn't have a fixed port but is commonly used in conjunction with SIP for the actual data transfer of audio and video streams.
-    """
-    return PACKET_WHISPERER
-
 # Define a class for chatting with pcap data
 class ChatWithPCAP:
     def __init__(self, json_path, token_limit=200):
+        self.document_cluster_mapping = {}
         self.json_path = json_path
         self.token_limit = token_limit
         self.conversation_history = []
@@ -75,7 +48,6 @@ class ChatWithPCAP:
         self.cluster_embeddings()
         self.setup_conversation_memory()
         self.setup_conversation_retrieval_chain()
-        self.priming_text = self.generate_priming_text()
 
     def load_json(self):
         self.loader = JSONLoader(
@@ -131,14 +103,19 @@ class ChatWithPCAP:
             st.write("Not enough embeddings for dimensionality reduction.")
 
     def cluster_embeddings(self, random_state=0):
-        # Check if embeddings_reduced is not None and has a suitable shape for clustering
         if self.embeddings_reduced is not None and self.embeddings_reduced.ndim == 2 and len(self.embeddings_reduced) > 1:
             n_clusters = self.get_optimal_clusters(self.embeddings_reduced)
             gm = GaussianMixture(n_components=n_clusters, random_state=random_state).fit(self.embeddings_reduced)
-            # Proceed with clustering
+            cluster_labels = gm.predict(self.embeddings_reduced)
+
+            # Populate the document_cluster_mapping
+            for i, cluster_label in enumerate(cluster_labels):
+                # If documents do not have a unique identifier, use their index
+                self.document_cluster_mapping[i] = cluster_label
+
+            st.write(f"Clustering completed with {n_clusters} clusters.")
         else:
             st.write("Reduced embeddings are not available or in incorrect shape for clustering.")
-            # Handle the case where clustering cannot proceed, such as setting default values or skipping steps that depend on clustering results.
 
     def get_optimal_clusters(self, embeddings, max_clusters=50, random_state=1234):
         if embeddings is None or len(embeddings) == 0:
@@ -160,23 +137,81 @@ class ChatWithPCAP:
         self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
         self.qa = ConversationalRetrievalChain.from_llm(self.llm, self.vectordb.as_retriever(search_kwargs={"k": 10}), memory=self.memory)
 
-    def generate_priming_text(self):
-        pcap_summary = " ".join([str(page) for page in self.pages[:5]])
-        return returnSystemText(pcap_summary)
+    def retrieve_relevant_documents(self, question, top_k=10):
+        """
+        Retrieve top_k documents relevant to the question.
+        """
+        try:
+            search_results = self.vectordb.search(query=question, search_type='similarity')
+            return [result for result in search_results]
+        except Exception as e:
+            st.write(f"Error retrieving documents: {e}")
+            return []
+
+    def identify_relevant_clusters(self, documents):
+        """
+        Identify clusters relevant to the given list of documents.
+
+        Parameters:
+            documents (list): A list of documents for which to identify relevant clusters.
+
+        Returns:
+            set: A set of unique cluster IDs relevant to the given documents.
+        """
+        cluster_ids = set()
+        for i, doc in enumerate(documents):
+            cluster_id = self.document_cluster_mapping.get(i)
+            if cluster_id is not None:
+                cluster_ids.add(cluster_id)
+        return cluster_ids
 
     def chat(self, question):
-        # Combine the original question with the priming text
-        primed_question = self.priming_text + "\n\n" + question
+        # New: Dynamically generate priming text based on the question
+        priming_text = self.generate_dynamic_priming_text(question)
+
+        # Combine the original question with the dynamic priming text
+        primed_question = priming_text + "\n\n" + question
         response = self.qa.invoke(primed_question)
+        self.conversation_history.append({"You": question, "AI": response})  # New: Update conversation history dynamically
         return response
 
-    def prepare_clustered_data(self):
-        """Prepare data for summarization by clustering."""
-        # Assume self.docs_clusters contains cluster IDs for each document
-        # and self.docs contains the original documents with their texts
+    def generate_dynamic_priming_text(self, question):
+        """
+        Generate dynamic priming text based on the question by summarizing relevant clusters.
+        This replaces the static approach with one that adapts to the user's query.
+        """
+        # New: Preliminary retrieval to find relevant clusters based on the question
+        relevant_docs = self.retrieve_relevant_documents(question)
+        relevant_clusters = self.identify_relevant_clusters(relevant_docs)
+        summaries = self.generate_summaries(relevant_clusters)  # New: Generate summaries for relevant clusters only
+        
+        # Combine summaries into a single priming text
+        return " ".join(summaries.values())
+
+    def prepare_clustered_data(self, clusters=None):
+        """
+        Prepare data for summarization by clustering.
+        Can now filter by specific clusters if provided, enhancing dynamic use.
+        """
+        # Initialize a list for filtered documents
+        filtered_docs = []
+
+        # If specific clusters are provided, filter documents belonging to those clusters
+        if clusters is not None:
+            for i, doc in enumerate(self.docs):
+                # Retrieve the cluster ID from the mapping using the document's index
+                cluster_id = self.document_cluster_mapping.get(i)
+                # If the document's cluster ID is in the specified clusters, include the document
+                if cluster_id in clusters:
+                    filtered_docs.append(doc)
+        else:
+            filtered_docs = self.docs
+
+        # Construct a DataFrame from the filtered documents
+        # You'll need to adjust how you access the text and cluster_id based on your Document object structure
         df = pd.DataFrame({
-            "Text": [doc['text'] for doc in self.docs],
-            "Cluster": self.docs_clusters
+            "Text": [doc.page_content for doc in filtered_docs],  # Adjust based on your document's structure
+            "Cluster": [self.document_cluster_mapping[i] for i in range(len(filtered_docs))]  # Access cluster IDs from the mapping
         })
         self.clustered_texts = self.format_cluster_texts(df)
 
@@ -188,13 +223,14 @@ class ChatWithPCAP:
             clustered_texts[cluster] = " --- ".join(cluster_texts)
         return clustered_texts
 
-    def generate_summaries(self):
-        """Generate summaries for each cluster of texts."""
+    # New: Override to accept specific clusters for targeted summarization
+    def generate_summaries(self, clusters=None):
+        self.prepare_clustered_data(clusters)
         summaries = {}
         for cluster, text in self.clustered_texts.items():
             summary = self.invoke_summary_generation(text)
             summaries[cluster] = summary
-        self.summaries = summaries
+        return summaries
 
     def invoke_summary_generation(self, text):
         """Invoke the language model to generate a summary for the given text."""
@@ -249,8 +285,14 @@ def chat_interface():
 
             st.markdown("**Chat History:**")
             for message in st.session_state['chat_instance'].conversation_history:
-                prefix = "*You:* " if isinstance(message, HumanMessage) else "*AI:* "
-                st.markdown(f"{prefix}{message.content}")
+                # Check if message is of type HumanMessage or AIMessage
+                if isinstance(message, (HumanMessage, AIMessage)):
+                    prefix = "*You:* " if isinstance(message, HumanMessage) else "*AI:* "
+                    st.markdown(f"{prefix}{message.content}")
+                else:
+                    # If the message is a dictionary, access the content using the key
+                    prefix = "*You:* " if "You" in message else "*AI:* "
+                    st.markdown(f"{prefix}{message['content']}")
 
 if __name__ == "__main__":
     if 'page' not in st.session_state:
