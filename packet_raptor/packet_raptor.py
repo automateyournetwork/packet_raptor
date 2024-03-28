@@ -2,23 +2,23 @@ import os
 import umap.umap_ as umap
 import pandas as pd
 import numpy as np
+import networkx as nx
 from sklearn.mixture import GaussianMixture
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
-from langchain.load import dumps, loads
 import subprocess
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import JSONLoader
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from pyvis.network import Network
+import streamlit.components.v1 as components
+from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
@@ -40,20 +40,19 @@ class AIMessage(Message):
 # Define a class for chatting with pcap data
 class ChatWithPCAP:
     def __init__(self, json_path, token_limit=200):
+        self.embedding_model = OpenAIEmbeddings()
+        self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
+        self.llm_model = "gpt-4-1106-preview"
+        self.client = OpenAI()
         self.document_cluster_mapping = {}
         self.json_path = json_path
         self.token_limit = token_limit
         self.conversation_history = []
         self.load_json()
         self.split_into_chunks()        
-        self.embed_texts()
-        self.store_in_chroma()
-        self.setup_conversation_memory()
-        self.setup_conversation_retrieval_chain()
         self.root_node = None
         self.create_leaf_nodes()
         self.build_tree()  # This will build the tree
-        
 
     def load_json(self):
         self.loader = JSONLoader(
@@ -66,33 +65,6 @@ class ChatWithPCAP:
     def split_into_chunks(self):
         self.text_splitter = SemanticChunker(OpenAIEmbeddings())
         self.docs = self.text_splitter.split_documents(self.pages)
-
-    def embed_texts(self):
-        self.embedding_model = OpenAIEmbeddings()
-        self.embeddings = []
-
-        for idx, doc in enumerate(self.docs):
-            try:
-                # Directly access the page_content attribute of the Document object
-                json_content_str = doc.page_content  # Adjusted based on the assumption that doc has a .page_content attribute
-
-                # Attempt to embed the extracted content
-                embedding = self.embedding_model.embed_query(json_content_str)
-                if embedding:  # Assuming embedding successfully returns a non-None result
-                    self.embeddings.append(embedding)
-                else:
-                    st.write(f"No embedding generated for document {idx}")
-            except Exception as e:
-                st.write(f"Error embedding document {idx}: {e}")
-
-        if len(self.embeddings) == 0:
-            st.write("Warning: No embeddings were generated.")
-        else:
-            st.write(f"Completed embedding. Total embeddings: {len(self.embeddings)}")
-
-    def store_in_chroma(self):
-        self.vectordb = Chroma.from_documents(self.docs, embedding=self.embedding_model)
-        self.vectordb.persist()
 
     def create_leaf_nodes(self):
         self.leaf_nodes = [Node(text=doc.page_content) for doc in self.docs]
@@ -182,7 +154,6 @@ class ChatWithPCAP:
 
         # Generate a summary for the combined text using the LLM
         summary = self.invoke_summary_generation(combined_text)
-        st.write("Cluster summary:", summary)
         return summary
 
     def get_optimal_clusters(self, embeddings, max_clusters=50, random_state=1234):
@@ -197,13 +168,6 @@ class ChatWithPCAP:
             for n in range(1, max_clusters + 1)
         ]
         return bics.index(min(bics)) + 1
-
-    def setup_conversation_memory(self):
-        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-    def setup_conversation_retrieval_chain(self):
-        self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
-        self.qa = ConversationalRetrievalChain.from_llm(self.llm, self.vectordb.as_retriever(search_kwargs={"k": 10}), memory=self.memory)
 
     def retrieve_relevant_documents_from_tree(self, question, node, threshold=0.5):
         # Check if we have reached a leaf node and decide its relevance
@@ -260,14 +224,58 @@ class ChatWithPCAP:
         return cluster_ids
 
     def chat(self, question):
-        # New: Dynamically generate priming text based on the question
-        priming_text = self.generate_dynamic_priming_text(question)
+        # Dynamically generate priming text based on the question by finding relevant nodes
+        relevant_nodes = self.retrieve_relevant_documents_from_tree(question, self.root_node)
+        priming_text = self.generate_priming_text_from_nodes(relevant_nodes)
 
         # Combine the original question with the dynamic priming text
         primed_question = priming_text + "\n\n" + question
-        response = self.qa.invoke(primed_question)
-        self.conversation_history.append({"You": question, "AI": response})  # New: Update conversation history dynamically
+
+        # Send the combined primed question to ChatGPT for completion
+        response = self.generate_response_with_chatgpt(primed_question)
+
+        # Update conversation history
+        self.conversation_history.append({"You": question, "AI": response})
         return response
+
+    def generate_priming_text_from_nodes(self, nodes):
+        # Combine text from relevant nodes into a single string to serve as priming text
+        combined_text = " ".join([node.text for node in nodes])
+        return combined_text   
+
+    def identify_relevant_clusters_based_on_query(self, question, node=None, threshold=0.5):
+        # Start from the root if no node is specified
+        if node is None:
+            node = self.root_node
+
+        relevant_clusters = []
+
+        # Base case: if it's a leaf node, return an empty list (as we're looking for clusters, not leaves)
+        if node.is_leaf():
+            return relevant_clusters
+
+        # Calculate the similarity between the question and the cluster's summary
+        question_embedding = self.embedding_model.embed_query(question)
+        cluster_summary_embedding = self.embedding_model.embed_query(node.text)  # Assuming node.text holds the cluster summary
+        similarity_score = self.calculate_similarity(question_embedding, cluster_summary_embedding)
+
+        # If the similarity score is above the threshold, this cluster is relevant
+        if similarity_score > threshold:
+            relevant_clusters.append(node)
+        else:
+            # Recursively check this node's children
+            for child in node.children:
+                relevant_clusters.extend(self.identify_relevant_clusters_based_on_query(question, child, threshold))
+
+        return relevant_clusters
+
+    def get_document_ids_from_clusters(self, clusters):
+        # Assuming each cluster (or node) has a list of document IDs associated with it
+        document_ids = []
+        for cluster in clusters:
+            # Assuming `cluster.documents` holds the IDs of documents in this cluster
+            document_ids.extend(cluster.documents)
+        return document_ids
 
     def generate_dynamic_priming_text(self, question):
         """
@@ -341,6 +349,54 @@ class ChatWithPCAP:
         st.write("Generated Summary:", summary)
         return summary
 
+    def display_summaries(self, node=None, level=0, summaries=None):
+        if summaries is None:
+            summaries = []
+        if node is None:
+            node = self.root_node
+        if node is not None:
+            # Assuming that node.text contains the summary
+            summaries.append((' ' * (level * 2)) + node.text)
+            for child in node.children:
+                self.display_summaries(child, level + 1, summaries)
+        return summaries
+
+    def create_tree_graph(self):
+        def add_nodes_recursively(graph, node, parent_name=None):
+            # Create a unique name for the node
+            node_name = f"{node.text[:10]}..." if node.text else "Root"
+            graph.add_node(node_name)
+
+            # Link the node to its parent if it exists
+            if parent_name:
+                graph.add_edge(parent_name, node_name)
+
+            for child in node.children:
+                add_nodes_recursively(graph, child, node_name)
+
+        G = nx.Graph()
+        add_nodes_recursively(G, self.root_node)
+        return G
+
+    def generate_response_with_chatgpt(self, primed_question):
+        # Format the messages for the API call
+        messages = [
+            {"role": "system", "content": "You are a packet capture analyzer with expert knowledge in computer networks."},
+            {"role": "user", "content": primed_question}
+        ]
+
+        # Perform the API call to generate the response
+        response = self.openai_client.chat.completions.create(
+            model=self.llm_model,
+            messages=messages
+        )
+
+        # Extract the text from the latest 'assistant' response
+        if response.choices:
+            return response.choices[0].message['content']
+        else:
+            return "I'm sorry, I couldn't generate a response."
+
 # Function to convert pcap to JSON
 def pcap_to_json(pcap_path, json_path):
     command = f'tshark -nlr {pcap_path} -T json > {json_path}'
@@ -373,6 +429,50 @@ def chat_interface():
     if 'chat_instance' not in st.session_state:
         st.session_state['chat_instance'] = ChatWithPCAP(json_path=json_path)
 
+    # Visualize the tree
+    if st.session_state['chat_instance'].root_node:
+        st.subheader("RAPTOR Tree Visualization")
+        G = st.session_state['chat_instance'].create_tree_graph()
+        nt = Network('800px', '800px', notebook=True, directed=True)
+        nt.from_nx(G)
+        nt.hrepulsion(node_distance=120, central_gravity=0.0, spring_length=100, spring_strength=0.01, damping=0.09)
+        nt.set_options("""
+            var options = {
+              "nodes": {
+                "scaling": {
+                  "label": true
+                }
+              },
+              "edges": {
+                "color": {
+                  "inherit": true
+                },
+                "smooth": false
+              },
+              "interaction": {
+                "hover": true,
+                "tooltipDelay": 300
+              },
+              "physics": {
+                "hierarchicalRepulsion": {
+                  "centralGravity": 0.0
+                },
+                "solver": "hierarchicalRepulsion"
+              }
+            }
+            """)
+        nt.show('tree.html')
+        HtmlFile = open('tree.html', 'r', encoding='utf-8')
+        source_code = HtmlFile.read() 
+        components.html(source_code, height=800, width=1000)
+
+    # New: Display the automated AI analysis (summaries) before asking a question
+    if st.session_state['chat_instance'].root_node:
+        st.subheader("Automated AI Analysis")
+        summaries = st.session_state['chat_instance'].display_summaries()
+        for summary in summaries:
+            st.markdown(f"* {summary}")
+
     user_input = st.text_input("Ask a question about the PCAP data:")
     if user_input and st.button("Send"):
         with st.spinner('Thinking...'):
@@ -392,7 +492,7 @@ def chat_interface():
                 else:
                     # If the message is a dictionary, access the content using the key
                     prefix = "*You:* " if "You" in message else "*AI:* "
-                    st.markdown(f"{prefix}{message.content}")
+                    st.markdown(f"{prefix}{message}")
 
 class Node:
     def __init__(self, text, children=None, embedding=None):

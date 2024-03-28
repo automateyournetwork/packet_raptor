@@ -16,7 +16,6 @@ RUN echo "==> Install dos2unix..." \
 
 RUN echo "==> Install langchain requirements.." \
   && pip install -U --quiet langchain_experimental langchain langchain-openai langchain-community \
-  && pip install chromadb \
   && pip install openai \
   && pip install tiktoken
 
@@ -40,6 +39,15 @@ RUN echo "==> Adding pandas ..." \
 
 RUN echo "==> Adding scikit-learn ..." \
   && pip install scikit-learn
+
+RUN echo "==> Adding networkx ..." \
+  && pip install networkx
+
+RUN echo "==> Adding pyvis ..." \
+  && pip install pyvis
+
+RUN echo "==> Adding dotenv ..." \
+  && pip install python-dotenv
 
 COPY /packet_raptor /packet_raptor/
 COPY /scripts /scripts/
