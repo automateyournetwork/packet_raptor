@@ -18,7 +18,9 @@ from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from pyvis.network import Network
 import streamlit.components.v1 as components
-from openai import OpenAI
+from langchain_community.vectorstores import Chroma
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 
 # Load environment variables
 load_dotenv()
@@ -43,7 +45,6 @@ class ChatWithPCAP:
         self.embedding_model = OpenAIEmbeddings()
         self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
         self.llm_model = "gpt-4-1106-preview"
-        self.client = OpenAI()
         self.document_cluster_mapping = {}
         self.json_path = json_path
         self.token_limit = token_limit
@@ -53,6 +54,9 @@ class ChatWithPCAP:
         self.root_node = None
         self.create_leaf_nodes()
         self.build_tree()  # This will build the tree
+        self.store_in_chroma()
+        self.setup_conversation_memory()
+        self.setup_conversation_retrieval_chain()
 
     def load_json(self):
         self.loader = JSONLoader(
@@ -112,9 +116,9 @@ class ChatWithPCAP:
         # Determine the number of clusters to start with
         # It could be a function of the number of leaf nodes, or a fixed number
         n_clusters = self.determine_initial_clusters(self.leaf_nodes)
-
         # Begin recursive clustering and summarization
         self.recursive_cluster_summarize(self.leaf_nodes, n_clusters=n_clusters)
+        root_summary_embedding = self.embedding_model.embed_query(self.root_node.text)
 
     def cluster_nodes(self, nodes, n_clusters=2):
         st.write(f"Clustering {len(nodes)} nodes into {n_clusters} clusters...")
@@ -154,6 +158,7 @@ class ChatWithPCAP:
 
         # Generate a summary for the combined text using the LLM
         summary = self.invoke_summary_generation(combined_text)
+        summary_embedding = self.embedding_model.embed_query(summary)
         return summary
 
     def get_optimal_clusters(self, embeddings, max_clusters=50, random_state=1234):
@@ -231,11 +236,8 @@ class ChatWithPCAP:
         # Combine the original question with the dynamic priming text
         primed_question = priming_text + "\n\n" + question
 
-        # Send the combined primed question to ChatGPT for completion
-        response = self.generate_response_with_chatgpt(primed_question)
-
-        # Update conversation history
-        self.conversation_history.append({"You": question, "AI": response})
+        response = self.qa.invoke(primed_question)
+        self.conversation_history.append({"You": question, "AI": response}) 
         return response
 
     def generate_priming_text_from_nodes(self, nodes):
@@ -378,24 +380,37 @@ class ChatWithPCAP:
         add_nodes_recursively(G, self.root_node)
         return G
 
-    def generate_response_with_chatgpt(self, primed_question):
-        # Format the messages for the API call
-        messages = [
-            {"role": "system", "content": "You are a packet capture analyzer with expert knowledge in computer networks."},
-            {"role": "user", "content": primed_question}
-        ]
+    def store_in_chroma(self):
+        st.write("Storing in Chroma")
+        all_texts = []
+        all_summaries = []
 
-        # Perform the API call to generate the response
-        response = self.openai_client.chat.completions.create(
-            model=self.llm_model,
-            messages=messages
-        )
+        def traverse_and_collect(node):
+            # Base case: if it's a leaf node, collect its text.
+            if node.is_leaf():
+                all_texts.append(node.text)
+            else:
+                # For non-leaf nodes, collect the summary.
+                all_summaries.append(node.text)
+                # Recursively process children.
+                for child in node.children:
+                    traverse_and_collect(child)
 
-        # Extract the text from the latest 'assistant' response
-        if response.choices:
-            return response.choices[0].message['content']
-        else:
-            return "I'm sorry, I couldn't generate a response."
+        # Start the traversal from the root node.
+        traverse_and_collect(self.root_node)
+
+        # Combine leaf texts and summaries.
+        combined_texts = all_texts + all_summaries
+        # Now, use all_texts to build the vectorstore with Chroma
+        
+        self.vectordb = Chroma.from_texts(texts=combined_texts, embedding=self.embedding_model)
+
+    def setup_conversation_memory(self):
+        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    def setup_conversation_retrieval_chain(self):
+        self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
+        self.qa = ConversationalRetrievalChain.from_llm(self.llm, self.vectordb.as_retriever(search_kwargs={"k": 10}), memory=self.memory)
 
 # Function to convert pcap to JSON
 def pcap_to_json(pcap_path, json_path):
