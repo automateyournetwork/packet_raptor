@@ -436,7 +436,7 @@ def get_ollama_models(base_url):
 
 # Streamlit UI for uploading and converting pcap file
 def upload_and_convert_pcap():
-    st.title('Packet Buddy - Chat with Packet Captures')
+    st.title('Packet Raptor - Chat with Packet Captures as a Tree')
     uploaded_file = st.file_uploader("Choose a PCAP file", type="pcap")
     if uploaded_file:
         if not os.path.exists('temp'):
@@ -460,7 +460,7 @@ def upload_and_convert_pcap():
 
 # Streamlit UI for chat interface
 def chat_interface():
-    st.title('Packet Buddy - Chat with Packet Captures')
+    st.title('Packet Raptor - Chat with Packet Captures as a Tree')
     json_path = st.session_state.get('json_path')
     if not json_path or not os.path.exists(json_path):
         st.error("PCAP file missing or not converted. Please go back and upload a PCAP file.")
