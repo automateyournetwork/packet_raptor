@@ -50,6 +50,9 @@ RUN echo "==> Adding pyvis ..." \
 RUN echo "==> Adding dotenv ..." \
   && pip install python-dotenv
 
+RUN echo "==> Adding Fast Embeddings ..." \
+  && pip install --upgrade --quiet  fastembed
+
 COPY /packet_raptor /packet_raptor/
 COPY /scripts /scripts/
 

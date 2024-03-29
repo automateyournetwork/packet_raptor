@@ -21,6 +21,9 @@ import streamlit.components.v1 as components
 from langchain_community.vectorstores import Chroma
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
+from langchain_community.llms import Ollama
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -42,9 +45,11 @@ class AIMessage(Message):
 # Define a class for chatting with pcap data
 class ChatWithPCAP:
     def __init__(self, json_path, token_limit=200):
-        self.embedding_model = OpenAIEmbeddings()
-        self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
-        self.llm_model = "gpt-4-1106-preview"
+        # self.embedding_model = OpenAIEmbeddings()
+        # self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
+        self.embedding_model = FastEmbedEmbeddings()
+        #self.llm = Ollama(model="llama2", base_url="http://ollama:11434")
+        self.llm = Ollama(model=st.session_state['selected_model'], base_url="http://ollama:11434")
         self.document_cluster_mapping = {}
         self.json_path = json_path
         self.token_limit = token_limit
@@ -345,7 +350,7 @@ class ChatWithPCAP:
         """Invoke the language model to generate a summary for the given text."""
         template = "You are an assistant to create a detailed summary of the text input provided.\nText:\n{text}"
         prompt = ChatPromptTemplate.from_template(template)
-        chain = prompt | self.llm | StrOutputParser()
+        chain = prompt | self.llm.invoke | StrOutputParser()
 
         summary = chain.invoke({"text": text})
         st.write("Generated Summary:", summary)
@@ -409,13 +414,25 @@ class ChatWithPCAP:
         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
     def setup_conversation_retrieval_chain(self):
-        self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
         self.qa = ConversationalRetrievalChain.from_llm(self.llm, self.vectordb.as_retriever(search_kwargs={"k": 10}), memory=self.memory)
 
 # Function to convert pcap to JSON
 def pcap_to_json(pcap_path, json_path):
     command = f'tshark -nlr {pcap_path} -T json > {json_path}'
     subprocess.run(command, shell=True)
+
+def get_ollama_models(base_url):
+    try:       
+        response = requests.get(f"{base_url}api/tags")  # Corrected endpoint
+        response.raise_for_status()
+        models_data = response.json()
+        
+        # Extract just the model names for the dropdown
+        models = [model['name'] for model in models_data.get('models', [])]
+        return models
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to get models from Ollama: {e}")
+        return []
 
 # Streamlit UI for uploading and converting pcap file
 def upload_and_convert_pcap():
@@ -431,7 +448,15 @@ def upload_and_convert_pcap():
         pcap_to_json(pcap_path, json_path)
         st.session_state['json_path'] = json_path
         st.success("PCAP file uploaded and converted to JSON.")
-        st.button("Proceed to Chat", on_click=lambda: st.session_state.update({"page": 2}))
+        
+        # Fetch and display the models in a select box
+        models = get_ollama_models("http://ollama:11434/")  # Make sure to use the correct base URL
+        if models:
+            selected_model = st.selectbox("Select Model", models)
+            st.session_state['selected_model'] = selected_model
+            
+            if st.button("Proceed to Chat"):
+                st.session_state['page'] = 2               
 
 # Streamlit UI for chat interface
 def chat_interface():
