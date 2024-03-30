@@ -15,9 +15,8 @@ RUN echo "==> Install dos2unix..." \
   && sudo apt-get install dos2unix -y 
 
 RUN echo "==> Install langchain requirements.." \
-  && pip install -U --quiet langchain_experimental langchain langchain-openai langchain-community \
+  && pip install -U --quiet langchain_experimental langchain langchain-community \
   && pip install chromadb \
-  && pip install openai \
   && pip install tiktoken
 
 RUN echo "==> Install jq.." \
@@ -46,9 +45,6 @@ RUN echo "==> Adding networkx ..." \
 
 RUN echo "==> Adding pyvis ..." \
   && pip install pyvis
-
-RUN echo "==> Adding dotenv ..." \
-  && pip install python-dotenv
 
 RUN echo "==> Adding Fast Embeddings ..." \
   && pip install --upgrade --quiet  fastembed
