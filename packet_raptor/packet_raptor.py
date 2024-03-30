@@ -202,12 +202,15 @@ class ChatWithPCAP:
 
     def chat(self, question):
         # Dynamically generate priming text based on the question by finding relevant nodes
+        st.write("getting revelant nodes")
         relevant_nodes = self.retrieve_relevant_documents_from_tree(question, self.root_node)
+        st.write("priming text")
         priming_text = self.generate_priming_text_from_nodes(relevant_nodes)
 
         # Combine the original question with the dynamic priming text
         primed_question = priming_text + "\n\n" + question
 
+        st.write("gnerating response")
         response = self.qa.invoke(primed_question)
         self.conversation_history.append({"You": question, "AI": response}) 
         return response
