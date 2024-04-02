@@ -31,9 +31,6 @@ RUN apt-get update && apt-get install -y tshark
 RUN echo "==> Adding pyshark ..." \
   && pip install pyshark
 
-RUN echo "==> Adding umap ..." \
-  && pip install umap-learn
-
 RUN echo "==> Adding pandas ..." \
   && pip install pandas
 
@@ -46,8 +43,9 @@ RUN echo "==> Adding networkx ..." \
 RUN echo "==> Adding pyvis ..." \
   && pip install pyvis
 
-RUN echo "==> Adding Fast Embeddings ..." \
-  && pip install --upgrade --quiet  fastembed
+RUN echo "==> Adding InstructorEmbedding ..." \
+  && pip install -U sentence-transformers==2.2.2 \
+  && pip install InstructorEmbedding
 
 COPY /packet_raptor /packet_raptor/
 COPY /scripts /scripts/

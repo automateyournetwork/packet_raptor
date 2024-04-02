@@ -19,7 +19,7 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.document_loaders import JSONLoader
 from langchain_experimental.text_splitter import SemanticChunker
-from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+from langchain_community.embeddings import HuggingFaceInstructEmbeddings 
 
 # Message classes
 class Message:
@@ -37,9 +37,8 @@ class AIMessage(Message):
 # Class for chatting with pcap data
 class ChatWithPCAP:
     def __init__(self, json_path):
-        # self.embedding_model = OpenAIEmbeddings()
-        # self.llm = ChatOpenAI(temperature=0.7, model="gpt-4-1106-preview")
-        self.embedding_model = FastEmbedEmbeddings()
+        with st.spinner("Downloading Instructor XL Embeddings Model locally....please be patient"):
+            self.embedding_model=HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-large", model_kwargs={"device": "cuda"})
         self.llm = Ollama(model=st.session_state['selected_model'], base_url="http://ollama:11434")
         self.document_cluster_mapping = {}
         self.json_path = json_path
