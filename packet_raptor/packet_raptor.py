@@ -21,6 +21,9 @@ from langchain_community.document_loaders import JSONLoader
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.embeddings import HuggingFaceInstructEmbeddings 
 
+with st.spinner("Downloading Instructor XL Embeddings Model locally....please be patient"):
+    embedding_model=HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-large", model_kwargs={"device": "cuda"})
+
 # Message classes
 class Message:
     def __init__(self, content):
@@ -37,8 +40,6 @@ class AIMessage(Message):
 # Class for chatting with pcap data
 class ChatWithPCAP:
     def __init__(self, json_path):
-        with st.spinner("Downloading Instructor XL Embeddings Model locally....please be patient"):
-            self.embedding_model=HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-large", model_kwargs={"device": "cuda"})
         self.llm = Ollama(model=st.session_state['selected_model'], base_url="http://ollama:11434")
         self.document_cluster_mapping = {}
         self.json_path = json_path
@@ -61,7 +62,7 @@ class ChatWithPCAP:
         self.pages = self.loader.load_and_split()
 
     def split_into_chunks(self):
-        self.text_splitter = SemanticChunker(self.embedding_model)
+        self.text_splitter = SemanticChunker(embedding_model)
         self.docs = self.text_splitter.split_documents(self.pages)
 
     def create_leaf_nodes(self):
@@ -72,7 +73,7 @@ class ChatWithPCAP:
     def embed_leaf_nodes(self):
         for leaf_node in self.leaf_nodes:
             try:
-                embedding = self.embedding_model.embed_query(leaf_node.text)
+                embedding = embedding_model.embed_query(leaf_node.text)
                 if embedding is not None and not np.isnan(embedding).any():
                     leaf_node.embedding = embedding
                 else:
@@ -124,7 +125,7 @@ class ChatWithPCAP:
 
         # Generate a summary for the combined text using the LLM
         summary = self.invoke_summary_generation(combined_text)
-        summary_embedding = self.embedding_model.embed_query(summary)
+        summary_embedding = embedding_model.embed_query(summary)
         return summary
 
     def recursive_cluster_summarize(self, nodes, depth=0, n_clusters=None):
@@ -153,7 +154,7 @@ class ChatWithPCAP:
         n_clusters = self.determine_initial_clusters(self.leaf_nodes)
         # Begin recursive clustering and summarization
         self.recursive_cluster_summarize(self.leaf_nodes, n_clusters=n_clusters)
-        root_summary_embedding = self.embedding_model.embed_query(self.root_node.text)
+        root_summary_embedding = embedding_model.embed_query(self.root_node.text)
 
     def store_in_chroma(self):
         st.write("Storing in Chroma")
@@ -178,7 +179,7 @@ class ChatWithPCAP:
         combined_texts = all_texts + all_summaries
         # Now, use all_texts to build the vectorstore with Chroma
         
-        self.vectordb = Chroma.from_texts(texts=combined_texts, embedding=self.embedding_model)
+        self.vectordb = Chroma.from_texts(texts=combined_texts, embedding=embedding_model)
 
     def setup_conversation_memory(self):
         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
@@ -200,53 +201,9 @@ class ChatWithPCAP:
         return bics.index(min(bics)) + 1
 
     def chat(self, question):
-        # Dynamically generate priming text based on the question by finding relevant nodes
-        st.write("getting revelant nodes")
-        relevant_nodes = self.retrieve_relevant_documents_from_tree(question, self.root_node)
-        st.write("priming text")
-        priming_text = self.generate_priming_text_from_nodes(relevant_nodes)
-
-        # Combine the original question with the dynamic priming text
-        primed_question = priming_text + "\n\n" + question
-
-        st.write("gnerating response")
-        response = self.qa.invoke(primed_question)
+        response = self.qa.invoke(question)
         self.conversation_history.append({"You": question, "AI": response}) 
         return response
-
-    def retrieve_relevant_documents_from_tree(self, question, node, threshold=0.5):
-        # Check if we have reached a leaf node and decide its relevance
-        if node.is_leaf():
-            # Calculate the similarity score between the question and the node's text
-            question_embedding = self.embedding_model.embed_query(question)
-            similarity_score = self.calculate_similarity(question_embedding, node.embedding)
-
-            # If the similarity score is above a certain threshold, it's relevant
-            if similarity_score > threshold:
-                return [node]
-            else:
-                return []
-
-        # Not a leaf, we need to decide which children are relevant
-        relevant_docs = []
-        for child_node in node.children:
-            relevant_docs.extend(self.retrieve_relevant_documents_from_tree(question, child_node, threshold))
-
-        return relevant_docs
-
-    def calculate_similarity(self, embedding1, embedding2):
-        # Ensure both embeddings are 2D arrays for the cosine_similarity function
-        embedding1 = np.array(embedding1).reshape(1, -1)
-        embedding2 = np.array(embedding2).reshape(1, -1)
-
-        # Calculate cosine similarity between the two embeddings
-        st.write("Cosine Similarity:", cosine_similarity(embedding1, embedding2)[0][0])
-        return cosine_similarity(embedding1, embedding2)[0][0]
-
-    def generate_priming_text_from_nodes(self, nodes):
-        # Combine text from relevant nodes into a single string to serve as priming text
-        combined_text = " ".join([node.text for node in nodes])
-        return combined_text  
 
     def update_conversation_history(self, question, response, relevant_nodes):
         # Store the question, response, and the paths through the tree that led to the response
@@ -273,32 +230,6 @@ class ChatWithPCAP:
                 cluster_ids.add(cluster_id)
         return cluster_ids
 
-    def identify_relevant_clusters_based_on_query(self, question, node=None, threshold=0.5):
-        # Start from the root if no node is specified
-        if node is None:
-            node = self.root_node
-
-        relevant_clusters = []
-
-        # Base case: if it's a leaf node, return an empty list (as we're looking for clusters, not leaves)
-        if node.is_leaf():
-            return relevant_clusters
-
-        # Calculate the similarity between the question and the cluster's summary
-        question_embedding = self.embedding_model.embed_query(question)
-        cluster_summary_embedding = self.embedding_model.embed_query(node.text)  # Assuming node.text holds the cluster summary
-        similarity_score = self.calculate_similarity(question_embedding, cluster_summary_embedding)
-
-        # If the similarity score is above the threshold, this cluster is relevant
-        if similarity_score > threshold:
-            relevant_clusters.append(node)
-        else:
-            # Recursively check this node's children
-            for child in node.children:
-                relevant_clusters.extend(self.identify_relevant_clusters_based_on_query(question, child, threshold))
-
-        return relevant_clusters
-
     def get_document_ids_from_clusters(self, clusters):
         # Assuming each cluster (or node) has a list of document IDs associated with it
         document_ids = []
@@ -306,24 +237,6 @@ class ChatWithPCAP:
             # Assuming `cluster.documents` holds the IDs of documents in this cluster
             document_ids.extend(cluster.documents)
         return document_ids
-
-    def generate_dynamic_priming_text(self, question):
-        """
-        Generate dynamic priming text based on the question by summarizing relevant clusters.
-        This replaces the static approach with one that adapts to the user's query.
-        """
-        # Make sure the tree is built and root_node is set before retrieving documents
-        if self.root_node is None:
-            st.write("Error: Root node is not set. Cannot retrieve documents without a starting node.")
-            return ""
-
-        # Call the method with both required arguments
-        relevant_docs = self.retrieve_relevant_documents_from_tree(question, self.root_node)
-        relevant_clusters = self.identify_relevant_clusters(relevant_docs)
-        summaries = self.generate_summaries(relevant_clusters)
-
-        # Combine summaries into a single priming text
-        return " ".join(summaries.values())
 
     def prepare_clustered_data(self, clusters=None):
         """
@@ -403,7 +316,7 @@ class ChatWithPCAP:
             for child in node.children:
                 add_nodes_recursively(graph, child, node_name)
 
-        G = nx.Graph()
+        G = nx.DiGraph()
         add_nodes_recursively(G, self.root_node)
         return G
 
